@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 
-from Options import PerGameCommonOptions, Choice, FreeText, Range
+from Options import Choice, FreeText, PerGameCommonOptions, Range
 
 MAX_HOURS = 120
 MAX_SLOTS = 5

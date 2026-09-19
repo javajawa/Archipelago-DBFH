@@ -1,22 +1,28 @@
 from __future__ import annotations
 
-from typing import Mapping, Any
+from typing import Any, Iterable, Mapping
 
 import enum
 
-from BaseClasses import Item, ItemClassification, Location, Region, CollectionRule
-from worlds.AutoWorld import World
-from worlds.generic.Rules import add_rule
 
+from BaseClasses import (
+    CollectionRule,
+    CollectionState,
+    Item,
+    ItemClassification,
+    Location,
+    Region,
+)
+from worlds.AutoWorld import WebWorld, World
+
+from .prizes import DBFHItems
 from .options import DBFHOptions, MAX_HOURS, MAX_SLOTS
 
 GAME = "Desert Bus For Hope"
 
 
-class DBFHItems(enum.IntEnum):
-    BusFuel = enum.auto()
-    DriverRefreshment = enum.auto()
-    FartMachine = enum.auto()
+class DBFHWebWorld(WebWorld):
+    theme = "dirt"
 
 
 class Checks(enum.StrEnum):
@@ -42,11 +48,11 @@ class DBFHLocation(Location):
         super().__init__(player, name, address, parent)
         self.force_progress = force_progression_item
 
-    # def can_fill(self, state: CollectionState, item: Item, check_access: bool = True) -> bool:
-    #     if self.force_progress and not item.advancement:
-    #         return False
-    #
-    #     return super().can_fill(state, item, check_access=check_access)
+    def can_fill(self, state: CollectionState, item: Item, check_access: bool = True) -> bool:
+        if self.force_progress and not item.advancement:
+            return False
+
+        return super().can_fill(state, item, check_access=check_access)
 
 
 def _slot_name(check_type: Checks, hour_zero_offset: int, slot_zero_offset: int = 0) -> str:
@@ -71,12 +77,14 @@ class DBFHWorld(World):
     game = GAME
     options_dataclass = DBFHOptions
 
+    web = DBFHWebWorld()
+
     options: DBFHOptions
     topology_present = False
 
     item_names = {x.name for x in DBFHItems}
-    item_id_to_name = {x.value: x.name for x in DBFHItems}
-    item_name_to_id = {x.name: x.value for x in DBFHItems}
+    item_id_to_name = {x.id: x.name for x in DBFHItems}
+    item_name_to_id = {x.name: x.id for x in DBFHItems}
 
     location_names = _generate_possible_locations()
     location_name_to_id = {name: id for id, name in enumerate(sorted(location_names))}
@@ -139,10 +147,16 @@ class DBFHWorld(World):
             DBFHItems.DriverRefreshment.value,
             self.player
         )
-        filler = self.create_filler()
-
         self.multiworld.itempool += ([fuel, refreshment] * progression_items)
-        self.multiworld.itempool += ([filler] * (total_locations - 2 * progression_items))
+
+        unused_filler: set[DBFHItems] = {item for item in DBFHItems if item.id > 1000}
+
+        for _ in range(total_locations - 2 * progression_items):
+            item = self.random.choice(list(unused_filler)) if unused_filler else DBFHItems.FartMachine
+            unused_filler.discard(item)
+            self.multiworld.itempool.append(
+                DBFHItem(item.name, ItemClassification.filler, item.id, self.player),
+            )
 
         for hour in range(hours):
             day = hour // 24
@@ -223,26 +237,22 @@ class DBFHWorld(World):
         #     between funded and played
         for hour in range(self.options.hour_funded_max.value):
             event_name = _event_name(Checks.HourFunded, hour)
-            event_location = self.multiworld.get_location(event_name, self.player)
 
-            add_rule(event_location, _gen_rule_resources(self.player, hour))
+            rules: list[CollectionRule] = [_gen_rule_resources(self.player, hour)]
 
             if hour:
-                add_rule(
-                    event_location,
-                    _gen_rule_event(self.player, Checks.HourFunded, hour - 1),
-                )
+                rules.append(_gen_rule_event(self.player, Checks.HourFunded, hour - 1))
 
             if funded_at := _estimated_played_hour_for_funded_hour(hour):
-                add_rule(
-                    event_location,
-                    _gen_rule_event(self.player, Checks.HourPlayed, funded_at),
-                )
+                rules.append(_gen_rule_event(self.player, Checks.HourPlayed, funded_at))
 
-            slot_rule = _gen_rule_event(self.player, Checks.HourFunded, hour)
+            event_location = self.multiworld.get_location(event_name, self.player)
+            set_rules(event_location, rules)
+
+            slot_rule = (_gen_rule_event(self.player, Checks.HourFunded, hour),)
             for slot in range(self.options.hour_funded_items.value):
                 location = self._loc(Checks.HourFunded, hour, slot)
-                add_rule(location, slot_rule)
+                set_rules(location, slot_rule)
 
         # Generate the expected rules for Hour Played
         #
@@ -255,16 +265,20 @@ class DBFHWorld(World):
             event_name = _event_name(Checks.HourPlayed, hour)
             event_location = self.multiworld.get_location(event_name, self.player)
 
-            add_rule(event_location, _gen_rule_resources(self.player, hour))
-            add_rule(event_location, _gen_rule_event(self.player, Checks.HourFunded, hour))
+            rules: list[CollectionRule] = [
+                _gen_rule_resources(self.player, hour),
+                _gen_rule_event(self.player, Checks.HourFunded, hour),
+            ]
 
             if hour:
-                add_rule(event_location, _gen_rule_event(self.player, Checks.HourPlayed, hour - 1))
+                rules.append(_gen_rule_event(self.player, Checks.HourPlayed, hour - 1))
 
-            slot_rule = _gen_rule_event(self.player, Checks.HourPlayed, hour)
+            set_rules(event_location, rules)
+
+            slot_rule = (_gen_rule_event(self.player, Checks.HourPlayed, hour),)
             for slot in range(self.options.hour_played_items.value):
                 location = self._loc(Checks.HourPlayed, hour, slot)
-                add_rule(location, slot_rule)
+                set_rules(location, slot_rule)
 
         # Set up the Goal conditions
         match self.options.goal.value:
@@ -293,6 +307,13 @@ class DBFHWorld(World):
                 )
             }
         }
+
+
+def set_rules(spot: Location, rules: Iterable[CollectionRule]) -> None:
+    if spot.access_rule is not Location.access_rule:
+        raise RuntimeError("Rule already set? " + spot.name + " " + str(spot.access_rule))
+
+    spot.access_rule = lambda state: all(rule(state) for rule in rules)
 
 
 def _estimated_played_hour_for_funded_hour(hour_zero_offset: int) -> int:
