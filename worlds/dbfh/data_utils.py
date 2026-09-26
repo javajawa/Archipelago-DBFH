@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import base64
+import asyncio
 import json
 import pathlib
+import sys
 from typing import Any, TypedDict
 
-import asyncio
 import aiohttp
 
 
@@ -60,7 +60,7 @@ class PrizesList(TypedDict):
     prizes: list[PrizeData]
 
 
-async def load_prize_data():
+async def load_prize_data() -> None:
     session = aiohttp.ClientSession(base_url="https://desertbus.org/api/")
 
     async with session.get("events") as req:
@@ -73,7 +73,7 @@ async def load_prize_data():
             data: PrizesList = await req.json()
 
         if not data.get("prizes"):
-            print("Error getting prizes for", event["name"])
+            sys.stdout.write(f"Error getting prizes for {event['name']}\n")
             continue
 
         for prize in data["prizes"]:
@@ -94,10 +94,12 @@ async def load_prize_data():
     with (root / "prizes.py").open("w", encoding="utf-8") as fh:
         fh.write('"""WARNING: This is a generated file by `data_utils.py` using API data."""\n')
         fh.write("""
+# ruff: noqa: E501
+
 from __future__ import annotations
 
-from typing import NamedTuple
 from enum import Enum
+from typing import NamedTuple
 
 
 class ItemSpec(NamedTuple):

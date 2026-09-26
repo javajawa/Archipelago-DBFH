@@ -34,11 +34,14 @@ Unlocks:
 
 Logically requires:
   - Event `Hour Funded [N-1]` (assuming N>1)
-  - N increments of progressive `Bus Fuel`
-  - N increments of progressive `Driver Refreshments`
+  - N-1 increments of progressive `Bus Fuel`
+  - N-1 increments of progressive `Driver Refreshments`
   - Event `Hour Played [...]` -- based on the last 5 Desert Buses, the earliest this hour has been
     purchased in a run (rounded down). This is primarily a hint for ordering between funded
     and played.
+
+(N-1 inputs are used to allow the game to be able to fulfill its first checks
+and thus be able to be generated)
 
 Actual Client Unlock Constraint:
  - Food and Fuel unlocked for this many hours
@@ -55,20 +58,20 @@ Unlocks:
 
 ## Death Link
 
-If possible, death link will occur when the DBfH crew crash the bus.
+Death link occurs when the DBfH crew crash the bus, with some delay.
+This is detected via a 'Crash' event being added to the VST (video strike
+team)'s tracking sheet. This has a 5 to 10 minute propagation delay.
 
 ## Client
 
-It will ideally use the standard client. Rather than connecting to a
-locally running game, it will connect the Desert Bus sub-pub URL
-supplied in the YAML used to generate the world, and then automatically
-mark the locations as time and donations progress (assuming enough
-fuel and refreshments have been received).
+The Client is based on the default client class. Rather than connecting to a
+locally running game, it uses the Desert Bus and VST APIs to poll for the
+state of the event. The client automatically marks locations as checked
+once time and donations progress (assuming enough fuel and refreshments
+have been received).
 
-The pub-sub format is a JS array (returned with content-type text/javascript).
-The first (and only?) value is the amount of money raised.
-The start date & time of the event is also provided in the YAML to calculate
-the elapsed bus time.
+The client uses the official Desert Bus REST and Phoenix APIs. The current
+event, its donation total, and its start time are discovered from the API.
 
 ## YAML Format
 
@@ -79,8 +82,7 @@ Desert Bus For Hope:
   # Goal -- functionally 'when the bot releases any extra items'
   goal: final_hour_played  # Or final_hour_funded
 
-  source_pubsub_url: https://pubsub.pubnub.com/history/sub-cbd7f5f5-1d3f-11e2-ac11-877a976e347c/total:GDVQRLBPQMSG/0/1
-  source_event_start: 2026-10-23T19:00:00Z
+  api_base_url: https://desertbus.org/api/
 
   # How many hours to track for
   hour_funded_max: 96   # Min 1, max 120

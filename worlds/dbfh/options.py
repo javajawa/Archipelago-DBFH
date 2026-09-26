@@ -3,14 +3,14 @@ from __future__ import annotations
 import abc
 import dataclasses
 
-from Options import Choice, FreeText, PerGameCommonOptions, Range
+from Options import Choice, DeathLinkMixin, FreeText, PerGameCommonOptions, Range
 
 MAX_HOURS = 120
 MAX_SLOTS = 5
 
 
 class DBFHGoal(Choice):
-    """When the client automatically calls !goal (and !release)
+    """When the client reports the Archipelago goal.
 
     - `final_hour_played`: When the bus has been fed and running for `hour_played_max` hours.
     - `final_hour_funded`: When the bus has been fed and funded through `hour_funded_max` hours.
@@ -22,18 +22,22 @@ class DBFHGoal(Choice):
     option_final_hour_funded = 1
 
 
-class DBPubSub(FreeText):
+class DBApi(FreeText):
     """
-    The pub-sub URL to get the current donation amount from.
+    The Desert Bus API base URL.
     """
-    display_name = "DBFH Pub-Sub URL"
+    display_name = "DBFH API Base URL"
+
+    default = "https://desertbus.org/api/"
 
 
-class DBStartDateTime(FreeText):
+class VSTApi(FreeText):
     """
-    The starting date and time of bus in ISO9601 format.
+    The Desert Bus API base URL.
     """
-    display_name = "DBFH Start Time"
+    display_name = "VST API Base URL"
+
+    default = "https://vst.ninja/"
 
 
 class DBHours(Range, abc.ABC):
@@ -92,11 +96,11 @@ class DriverGoodItemsFactor(Range):
 
 
 @dataclasses.dataclass
-class DBFHOptions(PerGameCommonOptions):
+class DBFHOptions(PerGameCommonOptions, DeathLinkMixin):
     goal: DBFHGoal
 
-    source_pubsub_url: DBPubSub
-    source_event_start: DBStartDateTime
+    api_base_url: DBApi
+    vst_base_url: VSTApi
 
     hour_funded_max: DBFundedHours
     hour_played_max: DBPlayedHours

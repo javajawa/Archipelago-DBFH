@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
-
-import enum
-
+from typing import ClassVar
 
 from BaseClasses import (
     CollectionRule,
@@ -15,19 +12,13 @@ from BaseClasses import (
 )
 from worlds.AutoWorld import WebWorld, World
 
+from .common import GAME, Checks, DBFHSlotData, event_name, location_id, location_name
+from .options import MAX_HOURS, MAX_SLOTS, DBFHOptions
 from .prizes import DBFHItems
-from .options import DBFHOptions, MAX_HOURS, MAX_SLOTS
-
-GAME = "Desert Bus For Hope"
 
 
 class DBFHWebWorld(WebWorld):
     theme = "dirt"
-
-
-class Checks(enum.StrEnum):
-    HourFunded = "Funded"
-    HourPlayed = "Played"
 
 
 class DBFHItem(Item):
@@ -55,24 +46,6 @@ class DBFHLocation(Location):
         return super().can_fill(state, item, check_access=check_access)
 
 
-def _slot_name(check_type: Checks, hour_zero_offset: int, slot_zero_offset: int = 0) -> str:
-    return f"Hour {hour_zero_offset + 1} {check_type.value} (Slot {slot_zero_offset + 1})"
-
-
-def _event_name(check_type: Checks, hour_zero_offset: int) -> str:
-    return f"Event: Hour {hour_zero_offset + 1} {check_type.value}"
-
-
-def _generate_possible_locations() -> set[str]:
-    return {
-        _slot_name(Checks.HourFunded, hour, slot)
-        for hour in range(MAX_HOURS) for slot in range(MAX_SLOTS)
-    } | {
-        _slot_name(Checks.HourPlayed, hour, slot)
-        for hour in range(MAX_HOURS) for slot in range(MAX_SLOTS)
-    }
-
-
 class DBFHWorld(World):
     game = GAME
     options_dataclass = DBFHOptions
@@ -82,13 +55,16 @@ class DBFHWorld(World):
     options: DBFHOptions
     topology_present = False
 
-    item_names = {x.name for x in DBFHItems}
-    item_id_to_name = {x.id: x.name for x in DBFHItems}
-    item_name_to_id = {x.name: x.id for x in DBFHItems}
+    item_names: ClassVar[set[str]] = {x.name for x in DBFHItems}
+    item_id_to_name: ClassVar[dict[int, str]] = {x.id: x.name for x in DBFHItems}
+    item_name_to_id: ClassVar[dict[str, int]] = {x.name: x.id for x in DBFHItems}
 
-    location_names = _generate_possible_locations()
-    location_name_to_id = {name: id for id, name in enumerate(sorted(location_names))}
-    location_id_to_name = {id: name for id, name in enumerate(sorted(location_names))}
+    location_id_to_name: ClassVar[dict[int, str]] = {
+        location_id(check, hour, slot): location_name(check, hour, slot)
+        for hour in range(MAX_HOURS) for slot in range(MAX_SLOTS) for check in Checks
+    }
+    location_names: ClassVar[set[str]] = set(location_id_to_name.values())
+    location_name_to_id: ClassVar[dict[str, int]] = {name: id for id, name in location_id_to_name.items()}
 
     def create_regions(self) -> None:
         hours = max(
@@ -135,19 +111,21 @@ class DBFHWorld(World):
         progression_items = int(hours * self.options.driver_goods_factor.value / 100)
         total_locations = hour_funded * hour_funded_items + hour_played * hour_played_items
 
-        fuel = DBFHItem(
-            DBFHItems.BusFuel.name,
-            ItemClassification.progression,
-            DBFHItems.BusFuel.value,
-            self.player
-        )
-        refreshment = DBFHItem(
-            DBFHItems.DriverRefreshment.name,
-            ItemClassification.progression,
-            DBFHItems.DriverRefreshment.value,
-            self.player
-        )
-        self.multiworld.itempool += ([fuel, refreshment] * progression_items)
+        for _ in range(progression_items):
+            self.multiworld.itempool.extend((
+                DBFHItem(
+                    DBFHItems.BusFuel.name,
+                    ItemClassification.progression,
+                    DBFHItems.BusFuel.id,
+                    self.player,
+                ),
+                DBFHItem(
+                    DBFHItems.DriverRefreshment.name,
+                    ItemClassification.progression,
+                    DBFHItems.DriverRefreshment.id,
+                    self.player,
+                ),
+            ))
 
         unused_filler: set[DBFHItems] = {item for item in DBFHItems if item.id > 1000}
 
@@ -170,8 +148,8 @@ class DBFHWorld(World):
             for slot in range(hour_funded_items if hour < hour_funded else 0):
                 region.locations.append(DBFHLocation(
                     player=self.player,
-                    name=_slot_name(Checks.HourFunded, hour, slot),
-                    address=None,
+                    name=location_name(Checks.HourFunded, hour, slot),
+                    address=self.location_name_to_id[location_name(Checks.HourFunded, hour, slot)],
                     parent=region,
                     force_progression_item=slot < hour_funded_priority,
                 ))
@@ -179,8 +157,8 @@ class DBFHWorld(World):
             for slot in range(hour_played_items if hour < hour_played else 0):
                 region.locations.append(DBFHLocation(
                     player=self.player,
-                    name=_slot_name(Checks.HourPlayed, hour, slot),
-                    address=None,
+                    name=location_name(Checks.HourPlayed, hour, slot),
+                    address=self.location_name_to_id[location_name(Checks.HourPlayed, hour, slot)],
                     parent=region,
                     force_progression_item=slot < hour_played_priority,
                 ))
@@ -189,18 +167,18 @@ class DBFHWorld(World):
         return DBFHItems.FartMachine.name
 
     def create_event(self, region: Region, check_type: Checks, hour_zero_offset: int) -> None:
-        event_name = _event_name(check_type, hour_zero_offset)
+        event = event_name(check_type, hour_zero_offset)
 
         event_location = DBFHLocation(
             self.player,
-            event_name,
+            event,
             None,
             region,
             False,
         )
 
         event_item = DBFHItem(
-            event_name,
+            event,
             ItemClassification.progression_skip_balancing,
             None,
             self.player,
@@ -214,31 +192,36 @@ class DBFHWorld(World):
         return DBFHItem(
             DBFHItems.FartMachine.name,
             ItemClassification.filler,
-            DBFHItems.FartMachine.value,
+            DBFHItems.FartMachine.id,
             self.player
         )
 
     def _loc(self, check_type: Checks, hour_zero_offset: int,
              slot_zero_offset: int = 0) -> Location:
         return self.multiworld.get_location(
-            _slot_name(check_type, hour_zero_offset, slot_zero_offset),
+            location_name(check_type, hour_zero_offset, slot_zero_offset),
             self.player
         )
 
     def set_rules(self) -> None:
+        rules: list[CollectionRule]
+
         # Generate the expected rules for Hour Funded
         #
         # Logically requires:
-        #   - N increments of progressive `Bus Fuel`
-        #   - N increments of progressive `Driver Refreshments`
+        #   - (N-1) increments of progressive `Bus Fuel`
+        #   - (N-1) increments of progressive `Driver Refreshments`
         #   - Event `Hour Funded [N-1]` (assuming previous hour)
         #   - Event `Hour Played [...]` -- based on the last 5 Desert Buses, the earliest this hour
         #     has been purchased in a run (rounded down). This is primarily a hint for ordering
         #     between funded and played
+        #
+        # This change uses (N-1) hours to allow a world to be self-fulfilling.
+        # This represents the initial donation made by DB/LRR at opening.
         for hour in range(self.options.hour_funded_max.value):
-            event_name = _event_name(Checks.HourFunded, hour)
+            event = event_name(Checks.HourFunded, hour)
 
-            rules: list[CollectionRule] = [_gen_rule_resources(self.player, hour)]
+            rules = [_gen_rule_resources(self.player, hour - 1)]
 
             if hour:
                 rules.append(_gen_rule_event(self.player, Checks.HourFunded, hour - 1))
@@ -246,7 +229,7 @@ class DBFHWorld(World):
             if funded_at := _estimated_played_hour_for_funded_hour(hour):
                 rules.append(_gen_rule_event(self.player, Checks.HourPlayed, funded_at))
 
-            event_location = self.multiworld.get_location(event_name, self.player)
+            event_location = self.multiworld.get_location(event, self.player)
             set_rules(event_location, rules)
 
             slot_rule = (_gen_rule_event(self.player, Checks.HourFunded, hour),)
@@ -262,10 +245,10 @@ class DBFHWorld(World):
         #  - Event `Hour Funded [N]`
         #  - Event `Hour Played [N-1]` (assuming N>1)
         for hour in range(self.options.hour_played_max.value):
-            event_name = _event_name(Checks.HourPlayed, hour)
-            event_location = self.multiworld.get_location(event_name, self.player)
+            event = event_name(Checks.HourPlayed, hour)
+            event_location = self.multiworld.get_location(event, self.player)
 
-            rules: list[CollectionRule] = [
+            rules = [
                 _gen_rule_resources(self.player, hour),
                 _gen_rule_event(self.player, Checks.HourFunded, hour),
             ]
@@ -284,7 +267,7 @@ class DBFHWorld(World):
         match self.options.goal.value:
             case self.options.goal.option_final_hour_funded:
                 goal_type = Checks.HourFunded
-                goal_hour = self.options.hour_funded_max.value - 1,
+                goal_hour = self.options.hour_funded_max.value - 1
             case self.options.goal.option_final_hour_played:
                 goal_type = Checks.HourPlayed
                 goal_hour = self.options.hour_played_max.value - 1
@@ -294,22 +277,25 @@ class DBFHWorld(World):
         goal = _gen_rule_event(self.player, goal_type, goal_hour)
         self.multiworld.completion_condition[self.player] = goal
 
-    def fill_slot_data(self) -> Mapping[str, Any]:
-        return {
-            "pub-sub": self.options.source_pubsub_url.value,
-            "start": self.options.source_event_start.value,
-            "goal": {
-                "type": self.options.goal.value,
-                "hours": (
-                    self.options.hour_funded_max.value
-                    if self.options.goal.value == self.options.goal.option_final_hour_funded
-                    else self.options.hour_played_max.value
-                )
-            }
-        }
+    def fill_slot_data(self) -> DBFHSlotData:
+        return DBFHSlotData(
+            api_url=self.options.api_base_url.value,
+            vst_url=self.options.vst_base_url.value,
+            death_link=bool(self.options.death_link.value),
+            funded_hours=self.options.hour_funded_max.value,
+            funded_items=self.options.hour_funded_items.value,
+            played_hours=self.options.hour_played_max.value,
+            played_items=self.options.hour_played_items.value,
+            goal_type=self.options.goal.value,
+            goal_hours=(
+                self.options.hour_funded_max.value
+                if self.options.goal.value == self.options.goal.option_final_hour_funded
+                else self.options.hour_played_max.value
+            )
+        )
 
 
-def set_rules(spot: Location, rules: Iterable[CollectionRule]) -> None:
+def set_rules(spot: Location, rules: list[CollectionRule] | tuple[CollectionRule]) -> None:
     if spot.access_rule is not Location.access_rule:
         raise RuntimeError("Rule already set? " + spot.name + " " + str(spot.access_rule))
 
@@ -335,5 +321,5 @@ def _gen_rule_resources(player: int, hour_zero_offset: int) -> CollectionRule:
 def _gen_rule_event(
         player: int, check_type: Checks, hour_zero_offset: int
 ) -> CollectionRule:
-    event = _event_name(check_type, hour_zero_offset)
+    event = event_name(check_type, hour_zero_offset)
     return lambda state: state.has(event, player)
