@@ -5,14 +5,16 @@ import csv
 import datetime
 import io
 import logging
-import math
+import sys
 import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator, Coroutine
 from typing import Any, NamedTuple
 
 import aiohttp
+import colorama
 
+import Utils
 from CommonClient import (
     ClientCommandProcessor,
     CommonContext,
@@ -22,7 +24,7 @@ from CommonClient import (
 )
 from NetUtils import ClientStatus
 
-from .common import GAME, Checks, DBFHSlotData, location_id
+from .common import GAME, Checks, DBFHSlotData, hours_unlocked_by_amount, location_id
 from .prizes import DBFHItems
 
 
@@ -99,6 +101,12 @@ class DBFHContext(CommonContext):
             logger.exception(exc)
             pass
 
+    async def server_auth(self, password_requested: bool = False) -> None:
+        if password_requested and not self.password:
+            await super().server_auth(password_requested)
+        await self.get_username()  # typing: ignore[no-untyped-call]
+        await self.send_connect()
+
     def on_package(self, cmd: str, args: dict[str, Any]) -> None:
         if cmd != "Connected":
             return
@@ -115,66 +123,67 @@ class DBFHContext(CommonContext):
         #       (this is optional -- the code will auto reconcile on the first
         #       pass, but it would be neater)
 
+        logger.info("Marking as connected to Archipelago")
         self._connected.set()
 
-    def _resource_count(self, item: DBFHItems) -> int:
-        return sum(received.item == item.value for received in self.items_received)
+    async def client_loop(self) -> None:
+        logger.info("Waiting for connection event")
+        await self._connected.wait()
 
-    def _locations_for_hour_range(self, check_type: Checks, from_hours: int, to_hours: int) -> set[int]:
-        assert self.slot_data is not None, "missing slot data"
+        assert self.slot_data, "no slot data loaded?"
 
-        match check_type:
-            case Checks.HourFunded:
-                slots = int(self.slot_data["funded_items"])
-            case Checks.HourPlayed:
-                slots = int(self.slot_data["played_items"])
-            case _:
-                raise RuntimeError
+        self._session = aiohttp.ClientSession(base_url=self.slot_data["api_url"])
+        self._vst_url = self.slot_data["vst_url"].strip("/")
 
-        return {
-            location_id(check_type, hour, slot)
-            for hour in range(from_hours, to_hours + 1)
-            for slot in range(slots)
-        }
+        logger.info("Loading Desert Bus For Hope event details")
+        while not self.exit_event.is_set():
+            try:
+                self.event = await self._get_event_info()
+                break
 
-    async def _submit_locations(self, funded: int = 0, played: int = 0) -> None:
-        assert self.slot_data is not None, "missing slot data"
+            except (TimeoutError, aiohttp.ClientError) as exc:
+                logger.warning("Unable to retrieve Desert Bus event information: %s", exc)
+                try:
+                    await asyncio.wait_for(self.exit_event.wait(), timeout=30)
+                except TimeoutError:
+                    pass
 
-        resourced_hours = min(
-            self._resource_count(DBFHItems.BusFuel),
-            self._resource_count(DBFHItems.DriverRefreshment)
-        )
+        if self.event is None:
+            logger.error("Unable to find Desert Bus for hope event")
+            await self._session.close()
+            self._session = None
+            return
 
-        funded = min(funded, resourced_hours, self.slot_data["funded_hours"])
-        played = min(played, resourced_hours, self.slot_data["played_hours"])
+        logger.info("Found event %s", self.event)
+        logger.info("Launching Bus watcher tasks")
+        self.task(self._watch_donation_total(), name="DBFH donations")
+        self.task(self._watch_elapsed_time(), name="DBFH elapsed time")
 
-        locations: set[int] = set()
+        if bool(self.slot_data["death_link"]):
+            logger.info("Launching Crash (death link) watcher")
+            self.task(self._watch_crashes(), name="DBFH crashes")
 
-        if funded >= self.processed_unlocks_funded:
-            locations |= self._locations_for_hour_range(Checks.HourFunded, self.processed_unlocks_funded, funded)
+        try:
+            await self.exit_event.wait()
+        finally:
+            for task in self._tasks:
+                task.cancel()
 
-        if played >= self.processed_unlocks_played:
-            locations |= self._locations_for_hour_range(Checks.HourPlayed, self.processed_unlocks_played, played)
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await self._session.close()
+            self._session = None
 
-        await self.check_locations(locations)
-
-        self.processed_unlocks_funded = max(funded, self.processed_unlocks_funded)
-        self.processed_unlocks_played = max(played, self.processed_unlocks_played)
-
-        goal_type = self.slot_data["goal_type"]
-        goal_hours = int(self.slot_data["goal_hours"])
-        goal_reached = (
-            funded >= goal_hours if goal_type == 1 else played >= goal_hours
-        )
-
-        if goal_reached and not self.finished_game:
-            self.finished_game = True
-            await self.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
+    async def shutdown(self) -> None:
+        logger.info("Shutdown called")
+        self.exit_event.set()
+        self._connected.set()  # 'cancel' connection
+        await asyncio.gather(*self._tasks)
+        await super().shutdown()  # typing: ignore[no-untyped-call]
 
     async def _get_event_info(self) -> EventDetails:
         assert self._session is not None, "missing http client"
 
-        async with self._session.get("events") as response:
+        async with self._session.get("events", verify_ssl=False) as response:
             response.raise_for_status()
             events = await response.json()
 
@@ -209,18 +218,22 @@ class DBFHContext(CommonContext):
                 continue
 
             amount = float(payload.get("response", {}).get("amount", 0))
-            unlocked = self._hours_unlocked_by_amount(amount)
+            unlocked = hours_unlocked_by_amount(amount)
+            logger.info("Amount is now %.2f, for %d hours funded", amount, unlocked)
 
             if unlocked > self.processed_unlocks_funded:
+                logger.debug("Attempting to mark %d hours funded", unlocked)
                 await self._submit_locations(funded=unlocked)
 
     async def _watch_elapsed_time(self) -> None:
         assert self.event is not None
 
         while not self.exit_event.is_set():
+            logger.debug("Current bus time (minutes): %d", self._current_bus_minute())
             hours = self._current_bus_minute() // 60
 
             if hours > self.processed_unlocks_played:
+                logger.debug("Attempting to mark play time up to %d hours", hours)
                 await self._submit_locations(played=hours)
 
             try:
@@ -236,6 +249,7 @@ class DBFHContext(CommonContext):
         while not self.exit_event.is_set():
             current = self._current_bus_minute()
             if "DeathLink" in self.tags and current >= previous:
+                logger.info("Checking for crashes from minute %d to minute %d", previous, current)
                 async for crash in self._check_for_crashes_since(previous, current, self.event.vst_event_id):
                     if crash.fingerprint in self.seen_crashes:
                         continue
@@ -250,11 +264,6 @@ class DBFHContext(CommonContext):
             except TimeoutError:
                 pass
 
-    def _current_bus_minute(self) -> int:
-        assert self.event is not None
-        now = datetime.datetime.now(datetime.UTC)
-        return max(0, int((now - self.event.event_start).total_seconds() // 60))
-
     async def _check_for_crashes_since(
         self, bus_time: int, current_bus_time: int, vst_id: str
     ) -> AsyncIterator[Crash]:
@@ -265,8 +274,10 @@ class DBFHContext(CommonContext):
 
         for day in range(first_day, last_day + 1):
             try:
+                logger.debug("Reading %s", f"{self._vst_url}/{vst_id}/synced_data/day{day}.csv")
                 async with self._session.get(
-                    f"{self._vst_url}/{vst_id}/synced_data/day{day}.csv"
+                    f"{self._vst_url}/{vst_id}/synced_data/day{day}.csv",
+                    verify_ssl=False,
                 ) as response:
                     if response.status == 404:
                         continue
@@ -283,7 +294,7 @@ class DBFHContext(CommonContext):
                 if minute is None or not bus_time < minute <= current_bus_time:
                     continue
                 description = row[3]
-                yield Crash(minute, (vst_id, minute, description), description)
+                yield Crash(minute, (vst_id, minute, description), description.removeprefix("^ "))
 
     @staticmethod
     def _parse_bus_time(value: str) -> int | None:
@@ -301,60 +312,66 @@ class DBFHContext(CommonContext):
 
         return hours * 60 + minutes
 
-    @staticmethod
-    def _hours_unlocked_by_amount(amount: float) -> int:
-        if amount < 1:
-            return 0
+    def _current_bus_minute(self) -> int:
+        assert self.event is not None
+        now = datetime.datetime.now(datetime.UTC)
+        return max(0, int((now - self.event.event_start).total_seconds() // 60))
 
-        raw_hours = math.log(amount + 14.2857, 1.07) - math.log(15.2857, 1.07) + 1
+    async def _submit_locations(self, funded: int = 0, played: int = 0) -> None:
+        assert self.slot_data is not None, "missing slot data"
 
-        return int(raw_hours)
+        fuel_count = self._resource_count(DBFHItems.BusFuel)
+        snack_count = self._resource_count(DBFHItems.DriverRefreshment)
+        resourced_hours = min(fuel_count, snack_count)
+        logger.debug("We have received %d fuel cans and %d snacks", fuel_count, snack_count)
 
-    async def client_loop(self) -> None:
-        await self._connected.wait()
+        funded = min(funded, resourced_hours, self.slot_data["funded_hours"])
+        played = min(played, resourced_hours, self.slot_data["played_hours"])
 
-        assert self.slot_data, "no slot data loaded?"
+        logger.debug("Submitting checks for %d hours funded and %d hours played", funded, played)
 
-        self._session = aiohttp.ClientSession(base_url=self.slot_data["api_url"])
-        self._vst_url = self.slot_data["vst_url"].strip("/")
+        locations: set[int] = set()
 
-        while not self.exit_event.is_set():
-            try:
-                self.event = await self._get_event_info()
-                break
+        if funded >= self.processed_unlocks_funded:
+            locations |= self._locations_for_hour_range(Checks.HourFunded, self.processed_unlocks_funded, funded)
 
-            except (TimeoutError, aiohttp.ClientError) as exc:
-                logger.warning("Unable to retrieve Desert Bus event information: %s", exc)
-                try:
-                    await asyncio.wait_for(self.exit_event.wait(), timeout=30)
-                except TimeoutError:
-                    pass
+        if played >= self.processed_unlocks_played:
+            locations |= self._locations_for_hour_range(Checks.HourPlayed, self.processed_unlocks_played, played)
 
-        if self.event is None:
-            await self._session.close()
-            self._session = None
-            return
+        await self.check_locations(locations)
 
-        self.task(self._watch_donation_total(), name="DBFH donations")
-        self.task(self._watch_elapsed_time(), name="DBFH elapsed time")
+        self.processed_unlocks_funded = max(funded, self.processed_unlocks_funded)
+        self.processed_unlocks_played = max(played, self.processed_unlocks_played)
 
-        if bool(self.slot_data["death_link"]):
-            self.task(self._watch_crashes(), name="DBFH crashes")
+        goal_type = self.slot_data["goal_type"]
+        goal_hours = int(self.slot_data["goal_hours"])
+        goal_reached = (
+            funded >= goal_hours if goal_type == 1 else played >= goal_hours
+        )
 
-        try:
-            await self.exit_event.wait()
-        finally:
-            for task in self._tasks:
-                task.cancel()
+        if goal_reached and not self.finished_game:
+            self.finished_game = True
+            await self.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
 
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-            await self._session.close()
-            self._session = None
+    def _resource_count(self, item: DBFHItems) -> int:
+        return sum(received.item == item.id for received in self.items_received)
 
-    async def shutdown(self) -> None:
-        self.exit_event.set()
-        await asyncio.gather(*self._tasks)
-        await super().shutdown()
+    def _locations_for_hour_range(self, check_type: Checks, from_hours: int, to_hours: int) -> set[int]:
+        assert self.slot_data is not None, "missing slot data"
+
+        match check_type:
+            case Checks.HourFunded:
+                slots = int(self.slot_data["funded_items"])
+            case Checks.HourPlayed:
+                slots = int(self.slot_data["played_items"])
+            case _:
+                raise RuntimeError
+
+        return {
+            location_id(check_type, hour, slot)
+            for hour in range(from_hours, to_hours + 1)
+            for slot in range(slots)
+        }
 
 
 class PhoenixMessage(NamedTuple):
@@ -433,10 +450,18 @@ class PhoenixClient:
 
 
 async def main(args: Namespace) -> None:
+    logger.info("Args: %s", args)
     ctx = DBFHContext(args.connect, args.password)
-    ctx.auth = args.name
+    if "name" in args:
+        ctx.auth = args.name
+
     ctx.task(server_loop(ctx), name="DBFH server loop")
     ctx.task(ctx.client_loop(), name="DBFH client loop")
+
+    if not sys.stdout or "--nogui" not in sys.argv:
+        ctx.run_gui()  # typing: ignore[no-untyped-call]
+    ctx.run_cli()  # typing: ignore[no-untyped-call]
+
     await ctx.exit_event.wait()
     await ctx.shutdown()
 
@@ -444,7 +469,12 @@ async def main(args: Namespace) -> None:
 def launch(*launch_args: str) -> None:
     parser = get_base_parser("Desert Bus For Hope client")
     args = parser.parse_args(launch_args)
+
+    Utils.init_logging("DBFHClient")
+
+    colorama.just_fix_windows_console()
     asyncio.run(main(args))
+    colorama.deinit()
 
 
 if __name__ == "__main__":

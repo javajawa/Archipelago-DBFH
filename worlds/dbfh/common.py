@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import math
 from typing import TypedDict
 
 from .options import MAX_HOURS, MAX_SLOTS
@@ -45,4 +46,13 @@ class DBFHSlotData(TypedDict):
     goal_hours: int
 
 
-__all__ = "GAME", "Checks", "DBFHSlotData", "event_name", "location_id", "location_name"
+def hours_unlocked_by_amount(amount: float) -> int:
+    if amount < 1:
+        return 0
+
+    raw_hours = math.log(amount + 14.2857, 1.07) - math.log(15.2857, 1.07) + 1
+
+    return int(raw_hours)
+
+
+__all__ = "GAME", "Checks", "DBFHSlotData", "event_name", "hours_unlocked_by_amount", "location_id", "location_name"

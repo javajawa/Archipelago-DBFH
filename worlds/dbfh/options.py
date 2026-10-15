@@ -5,7 +5,7 @@ import dataclasses
 
 from Options import Choice, DeathLinkMixin, FreeText, PerGameCommonOptions, Range
 
-MAX_HOURS = 120
+MAX_HOURS = 144
 MAX_SLOTS = 5
 
 

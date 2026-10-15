@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 from BaseClasses import (
@@ -11,10 +12,26 @@ from BaseClasses import (
     Region,
 )
 from worlds.AutoWorld import WebWorld, World
+from worlds.LauncherComponents import Component, Type, components, launch_subprocess
 
 from .common import GAME, Checks, DBFHSlotData, event_name, location_id, location_name
 from .options import MAX_HOURS, MAX_SLOTS, DBFHOptions
 from .prizes import DBFHItems
+
+
+def run_client(*args: str) -> None:
+    from .client import launch  # lazy import
+
+    launch_subprocess(launch, name="DBFHClient")
+
+
+components.append(
+    Component(
+        "Desert Bus For Hope Client",
+        func=run_client,
+        component_type=Type.CLIENT,
+    )
+)
 
 
 class DBFHWebWorld(WebWorld):
@@ -128,8 +145,10 @@ class DBFHWorld(World):
             ))
 
         unused_filler: set[DBFHItems] = {item for item in DBFHItems if item.id > 1000}
+        filler = total_locations - 2 * progression_items
 
-        for _ in range(total_locations - 2 * progression_items):
+        logging.info("DBFH: Creating %d filler items", filler)
+        for _ in range(filler):
             item = self.random.choice(list(unused_filler)) if unused_filler else DBFHItems.FartMachine
             unused_filler.discard(item)
             self.multiworld.itempool.append(
@@ -307,8 +326,13 @@ def _estimated_played_hour_for_funded_hour(hour_zero_offset: int) -> int:
 
     Returns the played hour assumed to line up with a funded hour.
     """
-
-    return 0 * hour_zero_offset
+    return {
+        109: 1, 110: 1, 111: 2, 112: 2, 113: 2, 114: 3, 115: 4, 116: 5, 117: 5,
+        118: 6, 119: 7, 120: 7, 121: 8, 122: 10, 123: 14, 124: 15, 125: 17,
+        126: 18, 127: 18, 128: 19, 129: 21, 130: 23, 131: 25, 132: 26,
+        133: 28, 134: 28, 135: 29, 136: 32, 137: 32, 138: 36, 139: 42,
+        140: 44, 141: 45, 142: 49, 143: 50
+    }.get(hour_zero_offset, 0)
 
 
 def _gen_rule_resources(player: int, hour_zero_offset: int) -> CollectionRule:

@@ -8,6 +8,9 @@ from typing import Any, TypedDict
 
 import aiohttp
 
+from worlds.dbfh.common import hours_unlocked_by_amount
+from worlds.dbfh.options import MAX_HOURS
+
 
 class SeriesData(TypedDict):
     id: str
@@ -124,6 +127,26 @@ class DBFHItems(ItemSpec, Enum):
             fh.write(")\n")
 
     await session.close()
+
+
+async def build_hours_map() -> None:
+    source = pathlib.Path(__file__).parent / "data" / "graphs.json"
+    with source.open("r") as stream:
+        data = json.load(stream)
+
+    latest_unlock = [0] * MAX_HOURS
+
+    for series in data:
+        last = 0
+        for hour, amount in enumerate(v["y"] for v in series["values"][::4]):
+            unlocked = hours_unlocked_by_amount(amount)
+            for h in range(last, min(unlocked, MAX_HOURS)):
+                latest_unlock[h] = max(latest_unlock[h], hour)
+            last = min(unlocked, MAX_HOURS)
+
+    mapping = {k: v for k,v in dict(enumerate(latest_unlock)).items() if v}
+    sys.stdout.write(str(mapping))
+    sys.stdout.write("\n")
 
 
 if __name__ == "__main__":
