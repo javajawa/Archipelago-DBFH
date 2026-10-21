@@ -1,0 +1,102 @@
+# Desert Bus For Hope AP World
+
+Basic concept: this is a "idler" world that unlocks progression for an Archipelago
+multi world run during Desert Bus For Hope, a charity / telathon event.
+For the first 96 hours, it will unlock one item when the hour is funded
+by donations, and two items when the hour has been played through.
+
+The numbers
+
+## Locations
+
+The rules for reachable places will be a mix based on "Events" (locations
+already cleared in the local 'game') and Items from the rest of the multiworld.
+
+This is intended to make this resolve gradually over the course of the event.
+
+### `Hour Played [N]`
+
+Logically requires:
+ - Event `Hour Played [N-1]` (assuming N>1)
+ - Event `Hour Funded [N]`
+ - N increments of progressive `Bus Fuel`
+ - N increments of progressive `Driver Refreshments`
+
+Actual Client Unlock Constraint:
+ - Food and Fuel unlocked
+ - Bus time shows the appropriate amount of hours
+
+Unlocks:
+ - One random non-local progression item
+ - One additional random non-local progression or QoL item
+
+### `Hour Funded [N]`
+
+Logically requires:
+  - Event `Hour Funded [N-1]` (assuming N>1)
+  - N-1 increments of progressive `Bus Fuel`
+  - N-1 increments of progressive `Driver Refreshments`
+  - Event `Hour Played [...]` -- based on the last 5 Desert Buses, the earliest this hour has been
+    purchased in a run (rounded down). This is primarily a hint for ordering between funded
+    and played.
+
+(N-1 inputs are used to allow the game to be able to fulfill its first checks
+and thus be able to be generated)
+
+Actual Client Unlock Constraint:
+ - Food and Fuel unlocked for this many hours
+ - Donations mean bus will run to this time
+
+Unlocks:
+ - One random non-local progression or QoL item
+
+## Items in external worlds
+
+- `1.5*max(N) x Bus Fuel`
+- `1.5*max(N) x Driver Refreshments`
+- Filler is Fart Machine
+
+## Death Link
+
+Death link occurs when the DBfH crew crash the bus, with some delay.
+This is detected via a 'Crash' event being added to the VST (video strike
+team)'s tracking sheet. This has a 5 to 10 minute propagation delay.
+
+## Client
+
+The Client is based on the default client class. Rather than connecting to a
+locally running game, it uses the Desert Bus and VST APIs to poll for the
+state of the event. The client automatically marks locations as checked
+once time and donations progress (assuming enough fuel and refreshments
+have been received).
+
+The client uses the official Desert Bus REST and Phoenix APIs. The current
+event, its donation total, and its start time are discovered from the API.
+
+## YAML Format
+
+Here is the proposed YAML with the
+
+```yaml
+Desert Bus For Hope:
+  # Goal -- functionally 'when the bot releases any extra items'
+  goal: final_hour_played  # Or final_hour_funded
+
+  api_base_url: https://desertbus.org/api/
+
+  # How many hours to track for
+  hour_funded_max: 96   # Min 1, max 120
+  hour_played_max: 96   # Min 1, max 120
+
+  # What items to give
+  hour_funded_items: 1  # Min 0, Max...technically undefined but practically 4-5ish
+  hour_funded_force_progression_items: 0  # Min 0, max `hour_funded_items`
+  hour_played_items: 1  # Min 0, Max...technically undefined but practically 4-5ish
+  hour_played_force_progression_items: 0  # Min 0, max `hour_played_items`
+
+  # How many items to add to the multiworld, expressed as a percentage
+  # of the amount needed to achieve the goal. Defaults to 50% extra for wiggle room.
+  driver_goods_factor: 150  # percentage Min 100, max undefined
+
+  death_link: true
+```
